@@ -1,0 +1,194 @@
+#!/usr/bin/env php
+<?php
+    
+    const GIT_USER_DIR = '/.git_control/';
+    const GIT_USER_FILENAME = 'git_user_permission';
+    const LOG_GIT_DIR = 'log/';
+
+    $logactions = true;
+    $home = getenv('HOME');
+    $logdate = date('Y_M_d');
+
+    $client = array();
+
+    $git_allowed_commands = array(
+        //when someone try to push anything to this repo (w)
+        'push' => 'git-receive-pack',
+
+        //when someone try to pull anything from this repo (r)
+        'pull' => 'git-upload-pack',
+    );
+
+    $error_msg = array(
+        'params' =>  "\nThis login key is not associated to any user.\n",
+        'command' => "\nYou do not have power here. Only the strong ones shall have.\n",
+        'permfile' => "\nThe permission file does not exist or its mode is unsafe.\n",
+        'noperm' => "\nYou shall not pass!\n",
+    );
+
+    if ($argc < 2)
+    {
+        fwrite(STDERR, $error_msg['params']);
+        exit;
+    }
+
+    
+    function git_access_log($action)
+    {
+        global $home, $logdate, $logactions;
+
+        if (!$logactions)
+        {
+            return false;
+        }
+
+        $logpath = $home . GIT_USER_DIR . LOG_GIT_DIR;
+        $logfilename = $logpath . $logdate;
+
+        if (!is_dir($logpath))
+        {
+            mkdir($logpath, 0755, true);
+        }
+
+        $log = fopen($logfilename, 'a+');
+        fputs($log, $action);
+        fclose($log);
+
+        return true;
+   }
+
+
+    //returns the array only if the command is a git command
+    function ssh_parse_command()
+    {
+        global $git_allowed_commands;
+
+        $command = explode(' ', getenv('SSH_ORIGINAL_COMMAND'));
+        
+        if (empty($command)
+         || !in_array($command[0], $git_allowed_commands)
+        )
+        {
+            return false;
+        }
+        
+        
+        return array(
+            'git-command' => $command[0],
+            'git-repo' => $command[1]
+        );
+    }
+
+
+
+    //returns the array only if the file is 0600
+    function get_git_permissions()
+    {
+        global $home;
+
+        $fullpath = $home . GIT_USER_DIR . GIT_USER_FILENAME;
+        
+        //checks if permission is not tamperable
+        if (!file_exists($fullpath) 
+         || !((fileperms($fullpath) & 0777) === 0600)
+        )
+        {
+            return false;
+        }
+
+        $userperm = json_decode(file_get_contents($fullpath), true);
+       
+        $json_err = json_last_error();
+        if ($json_err !== JSON_ERROR_NONE)
+        {
+            git_access_log("ERROR- code:(".$json_err.") the encode or the syntax is incorrect.\n");
+        }
+
+        return $userperm;
+    }
+
+
+
+    //checks a permission for a certain user
+    function can_access_repo($userperms, $command)
+    {
+        global $git_allowed_commands;
+
+        $repo = explode('/', $command['git-repo']);
+        $repo = substr(array_pop($repo), 0, -1);
+
+
+        if (!isset($userperms[$repo]))
+        {
+            git_access_log("ERROR- this repository is not listed under this user.\n");
+            return false;
+        }
+
+        //git-receive must has write permission
+        if (($command['git-command'] === $git_allowed_commands['push'])
+         && (strpos($userperms[$repo], 'w') !== false)
+        )
+        {
+            return true;
+        }
+        
+        //git-upload must has read permission
+        if (($command['git-command'] === $git_allowed_commands['pull'])
+         && (strpos($userperms[$repo], 'r') !== false)
+        )
+        {
+            return true;
+        }
+
+        git_access_log("ERROR- the user does not has permission to this repository.\n");
+ 
+        return false;
+    }
+
+
+
+    //main part of the script
+    git_access_log("\n\n" . '*** at: ' . date('H:i:s') . "\n");
+
+    $client['user'] = $argv[1];
+
+    git_access_log('    user:' . $client['user'] . "\n");
+
+    $command = ssh_parse_command();
+
+    if (!$command)
+    {
+        git_access_log('ERROR- ' . $error_msg['command'] . "***\n");
+        fwrite(STDERR, $error_msg['command']);
+        exit;
+    }
+    
+    git_access_log('    command:' . $command['git-command'] . "\n"
+                  .'    repo:' . $command['git-repo'] . "\n");
+
+    $permissions = get_git_permissions();
+
+    if (!$permissions)
+    {
+        git_access_log('ERROR- ' . $error_msg['permfile'] . "***\n");
+        fwrite(STDERR, $error_msg['permfile']);
+        exit;
+    }
+
+    if (isset($permissions[$client['user']])
+     && can_access_repo($permissions[$client['user']], $command)
+    )
+    {
+        git_access_log("    Permission granted. User good to go.\n***\n");
+        fwrite(STDERR, "Ok, you're good to go.\n");
+
+        //finally exec thy command
+        $exec = 'git shell -c "'.getenv('SSH_ORIGINAL_COMMAND').'"';
+        passthru($exec, $retval);
+        exit;
+    }
+    else
+    {
+        git_access_log('ERROR- ' . $error_msg['noperm'] . "***\n");
+        fwrite(STDERR, $error_msg['noperm']);
+    }
